@@ -288,7 +288,7 @@ void test_output_format() {
   auto enc = meowcrypto::encrypt("a", "12#$");
   require(enc.ok, "encryption should succeed");
 
-  // 输出应该只包含16个猫叫字符
+  // 输出应该只包含16个猫叫字符 + "~"修饰符
   bool all_valid = true;
   std::string output = enc.value;
   const char* valid_meows[] = {"喵", "呜", "咪", "嗷", "呼", "噜", "哈", "嘶",
@@ -296,11 +296,16 @@ void test_output_format() {
   size_t i = 0;
   while (i < output.size()) {
     bool found = false;
+    // 检查是否是猫叫字符
     for (const char* vc : valid_meows) {
       size_t len = strlen(vc);
       if (output.compare(i, len, vc) == 0) {
         found = true;
         i += len;
+        // 检查是否跟随~修饰符
+        if (i < output.size() && output[i] == '~') {
+          i += 1;
+        }
         break;
       }
     }
@@ -311,9 +316,10 @@ void test_output_format() {
   }
   require(all_valid, "output should only contain valid meow characters");
 
-  // 输出长度应该是6的倍数（每字节2个汉字，每汉字3字节UTF-8）
-  require(enc.value.size() % 6 == 0,
-          "output size should be multiple of 6 bytes");
+  // 新编码：8个符号=5字节，每符号是1个汉字(3字节)+可选~(1字节)
+  // 不再检查固定长度倍数，改为检查能否正确解密
+  auto dec = meowcrypto::decrypt(enc.value, "12#$");
+  require(dec.ok && dec.value == "a", "output format should be decodable");
 }
 
 // ========================
