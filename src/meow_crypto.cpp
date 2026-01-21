@@ -9,12 +9,25 @@ namespace meowcrypto {
 namespace {
 
 const std::string kDefaultKey = "12#$";
-// 4个字符，每个承载2bit（四进制），4个汉字=8bit=1字节
-const std::string kChars[4] = {
-    "喵",  // 0
-    "呜",  // 1
-    "咪",  // 2
-    "嗷",  // 3
+// 16个字符，每个承载4bit（十六进制），2个汉字=8bit=1字节
+// 信息密度是原来的2倍！
+const std::string kChars[16] = {
+    "喵",  // 0  - 基础猫叫
+    "呜",  // 1  - 低沉叫声
+    "咪",  // 2  - 温柔叫声
+    "嗷",  // 3  - 大声叫
+    "呼",  // 4  - 呼噜声
+    "噜",  // 5  - 呼噜声变体
+    "哈",  // 6  - 哈气声
+    "嘶",  // 7  - 嘶叫
+    "嗯",  // 8  - 撒娇声
+    "哼",  // 9  - 不满声
+    "唔",  // A  - 困倦声
+    "啾",  // B  - 小叫声
+    "嘤",  // C  - 委屈声
+    "咕",  // D  - 咕噜声
+    "呦",  // E  - 呼唤声
+    "吼",  // F  - 凶猛叫
 };
 
 uint32_t fnv1a_32(const std::string& s) {
@@ -54,50 +67,56 @@ bool is_ascii_key(const std::string& key, std::string& error) {
   return true;
 }
 
-// 将字节编码为4个喵/呜/咪/嗷（每2bit一个字符，四进制）
+// 将字节编码为2个猫叫字符（每4bit一个字符，十六进制）
 std::string encode_byte(unsigned char c) {
   std::string out;
-  // 从高位到低位，每次取2bit
-  for (int i = 3; i >= 0; --i) {
-    int digit = (c >> (i * 2)) & 0x3;
-    out += kChars[digit];
-  }
+  // 高4位 + 低4位
+  out += kChars[(c >> 4) & 0xF];
+  out += kChars[c & 0xF];
   return out;
 }
 
-// 从4个喵/呜/咪/嗷解码为1字节
+// 从2个猫叫字符解码为1字节
 bool decode_byte(const std::string& input, size_t pos, unsigned char& out) {
   out = 0;
-  size_t char_pos = pos;
   const size_t char_size = kChars[0].size();  // 3 bytes per UTF-8 char
 
-  for (int i = 3; i >= 0; --i) {
-    if (char_pos + char_size > input.size()) return false;
-
-    int digit = -1;
-    for (int d = 0; d < 4; ++d) {
-      if (input.compare(char_pos, char_size, kChars[d]) == 0) {
-        digit = d;
-        break;
-      }
+  // 解码高4位
+  if (pos + char_size > input.size()) return false;
+  int hi = -1;
+  for (int d = 0; d < 16; ++d) {
+    if (input.compare(pos, char_size, kChars[d]) == 0) {
+      hi = d;
+      break;
     }
-    if (digit < 0) return false;
-
-    out |= (digit << (i * 2));
-    char_pos += char_size;
   }
+  if (hi < 0) return false;
+
+  // 解码低4位
+  pos += char_size;
+  if (pos + char_size > input.size()) return false;
+  int lo = -1;
+  for (int d = 0; d < 16; ++d) {
+    if (input.compare(pos, char_size, kChars[d]) == 0) {
+      lo = d;
+      break;
+    }
+  }
+  if (lo < 0) return false;
+
+  out = static_cast<unsigned char>((hi << 4) | lo);
   return true;
 }
 
-// 编码：首字节存长度，然后数据，最后补齐到4的倍数
+// 编码：首字节存长度，然后数据，最后补齐到2的倍数
 std::string encode_bytes(const std::string& input) {
   // 计算需要的总字节数（1字节长度 + 数据）
   size_t data_len = input.size();
   size_t total_bytes = 1 + data_len;  // 长度字节 + 数据
 
-  // 对齐到4字节的倍数（每字节=4个汉字，4字节=16汉字）
-  size_t aligned_bytes = ((total_bytes + 3) / 4) * 4;
-  if (aligned_bytes == 0) aligned_bytes = 4;
+  // 对齐到2字节的倍数（每字节=2个汉字，2字节=4汉字）
+  size_t aligned_bytes = ((total_bytes + 1) / 2) * 2;
+  if (aligned_bytes == 0) aligned_bytes = 2;
 
   std::string out;
 
@@ -120,16 +139,16 @@ std::string encode_bytes(const std::string& input) {
 Result decode_bytes(const std::string& input, std::string& out) {
   out.clear();
 
-  // 每个汉字3字节（UTF-8），每字节需要4个汉字
+  // 每个汉字3字节（UTF-8），每字节需要2个汉字
   const size_t char_size = kChars[0].size();        // 3
-  const size_t byte_chars = 4;                      // 4个汉字=1字节
-  const size_t byte_size = char_size * byte_chars;  // 12
+  const size_t byte_chars = 2;                      // 2个汉字=1字节
+  const size_t byte_size = char_size * byte_chars;  // 6
 
   if (input.size() < byte_size) {
     return Result::Err("输入太短");
   }
 
-  // 检查输入长度是否为24的倍数（8个汉字的倍数）
+  // 检查输入长度是否为6的倍数（2个汉字的倍数）
   if (input.size() % byte_size != 0) {
     return Result::Err("输入长度非法");
   }
@@ -137,7 +156,7 @@ Result decode_bytes(const std::string& input, std::string& out) {
   // 解码第一字节：原始数据长度
   unsigned char len_byte;
   if (!decode_byte(input, 0, len_byte)) {
-    return Result::Err("非法喵呜片段");
+    return Result::Err("非法猫叫片段");
   }
   size_t data_len = len_byte;
 
@@ -151,7 +170,7 @@ Result decode_bytes(const std::string& input, std::string& out) {
   for (size_t i = 0; i < data_len; ++i) {
     unsigned char c;
     if (!decode_byte(input, (i + 1) * byte_size, c)) {
-      return Result::Err("非法喵呜片段");
+      return Result::Err("非法猫叫片段");
     }
     out.push_back(static_cast<char>(c));
   }
