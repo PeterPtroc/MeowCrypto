@@ -9,27 +9,12 @@ namespace meowcrypto {
 namespace {
 
 const std::string kDefaultKey = "12#$";
-const std::string kSeparator = "～";  // 全角波浪线作为字符分隔
-
-// 16个token，每个承载4bit，更高信息密度
-// 使用无歧义的token集合：每个token都以不同的结尾字符结束
-const std::vector<std::string> kTokens = {
-    "喵.",    // 0
-    "呜.",    // 1
-    "喵~",    // 2
-    "呜~",    // 3
-    "喵喵.",  // 4
-    "呜呜.",  // 5
-    "喵呜.",  // 6
-    "呜喵.",  // 7
-    "喵!",    // 8
-    "呜!",    // 9
-    "喵喵~",  // 10
-    "呜呜~",  // 11
-    "喵呜~",  // 12
-    "呜喵~",  // 13
-    "喵喵!",  // 14
-    "呜呜!",  // 15
+// 4个字符，每个承载2bit（四进制），4个汉字=8bit=1字节
+const std::string kChars[4] = {
+    "喵",  // 0
+    "呜",  // 1
+    "咪",  // 2
+    "嗷",  // 3
 };
 
 uint32_t fnv1a_32(const std::string& s) {
@@ -69,82 +54,113 @@ bool is_ascii_key(const std::string& key, std::string& error) {
   return true;
 }
 
-// 按字节编码：每字节用2个token（高4bit + 低4bit）
-// 字符之间用全角波浪线分隔，更像猫叫
-std::string encode_bytes(const std::string& input) {
-  std::ostringstream oss;
-  for (size_t i = 0; i < input.size(); ++i) {
-    unsigned char c = static_cast<unsigned char>(input[i]);
-    int hi = (c >> 4) & 0x0F;
-    int lo = c & 0x0F;
-    oss << kTokens[hi] << kTokens[lo];
-    if (i + 1 < input.size()) {
-      oss << kSeparator;
-    }
+// 将字节编码为4个喵/呜/咪/嗷（每2bit一个字符，四进制）
+std::string encode_byte(unsigned char c) {
+  std::string out;
+  // 从高位到低位，每次取2bit
+  for (int i = 3; i >= 0; --i) {
+    int digit = (c >> (i * 2)) & 0x3;
+    out += kChars[digit];
   }
-  return oss.str();
+  return out;
 }
 
-// 查找token并返回其索引（0-15），失败返回-1
-// 使用最长匹配优先策略
-int find_token(const std::string& input, size_t pos, size_t& consumed) {
-  size_t max_len = 0;
-  int best_idx = -1;
+// 从4个喵/呜/咪/嗷解码为1字节
+bool decode_byte(const std::string& input, size_t pos, unsigned char& out) {
+  out = 0;
+  size_t char_pos = pos;
+  const size_t char_size = kChars[0].size();  // 3 bytes per UTF-8 char
 
-  for (int idx = 0; idx < 16; ++idx) {
-    const std::string& tok = kTokens[idx];
-    if (tok.size() > max_len && pos + tok.size() <= input.size() &&
-        input.compare(pos, tok.size(), tok) == 0) {
-      max_len = tok.size();
-      best_idx = idx;
+  for (int i = 3; i >= 0; --i) {
+    if (char_pos + char_size > input.size()) return false;
+
+    int digit = -1;
+    for (int d = 0; d < 4; ++d) {
+      if (input.compare(char_pos, char_size, kChars[d]) == 0) {
+        digit = d;
+        break;
+      }
     }
+    if (digit < 0) return false;
+
+    out |= (digit << (i * 2));
+    char_pos += char_size;
+  }
+  return true;
+}
+
+// 编码：首字节存长度，然后数据，最后补齐到4的倍数
+std::string encode_bytes(const std::string& input) {
+  // 计算需要的总字节数（1字节长度 + 数据）
+  size_t data_len = input.size();
+  size_t total_bytes = 1 + data_len;  // 长度字节 + 数据
+
+  // 对齐到4字节的倍数（每字节=4个汉字，4字节=16汉字）
+  size_t aligned_bytes = ((total_bytes + 3) / 4) * 4;
+  if (aligned_bytes == 0) aligned_bytes = 4;
+
+  std::string out;
+
+  // 第一字节：原始数据长度（最大支持255字节）
+  out += encode_byte(static_cast<unsigned char>(data_len & 0xFF));
+
+  // 数据字节
+  for (unsigned char c : input) {
+    out += encode_byte(c);
   }
 
-  consumed = max_len;
-  return best_idx;
+  // 填充字节（用0填充）
+  for (size_t i = total_bytes; i < aligned_bytes; ++i) {
+    out += encode_byte(0);
+  }
+
+  return out;
 }
 
 Result decode_bytes(const std::string& input, std::string& out) {
   out.clear();
-  size_t pos = 0;
-  size_t n = input.size();
 
-  while (pos < n) {
-    // 跳过分隔符
-    if (input.compare(pos, kSeparator.size(), kSeparator) == 0) {
-      pos += kSeparator.size();
-      continue;
-    }
+  // 每个汉字3字节（UTF-8），每字节需要4个汉字
+  const size_t char_size = kChars[0].size();        // 3
+  const size_t byte_chars = 4;                      // 4个汉字=1字节
+  const size_t byte_size = char_size * byte_chars;  // 12
 
-    // 读取高4bit
-    size_t consumed = 0;
-    int hi = find_token(input, pos, consumed);
-    if (hi < 0) {
+  if (input.size() < byte_size) {
+    return Result::Err("输入太短");
+  }
+
+  // 检查输入长度是否为24的倍数（8个汉字的倍数）
+  if (input.size() % byte_size != 0) {
+    return Result::Err("输入长度非法");
+  }
+
+  // 解码第一字节：原始数据长度
+  unsigned char len_byte;
+  if (!decode_byte(input, 0, len_byte)) {
+    return Result::Err("非法喵呜片段");
+  }
+  size_t data_len = len_byte;
+
+  // 检查数据长度是否合理
+  size_t total_bytes = input.size() / byte_size;
+  if (data_len > total_bytes - 1) {
+    return Result::Err("长度字段非法");
+  }
+
+  // 解码数据字节
+  for (size_t i = 0; i < data_len; ++i) {
+    unsigned char c;
+    if (!decode_byte(input, (i + 1) * byte_size, c)) {
       return Result::Err("非法喵呜片段");
     }
-    pos += consumed;
-
-    // 跳过可能的分隔符（不应该出现在字节中间，但容错）
-    if (pos < n && input.compare(pos, kSeparator.size(), kSeparator) == 0) {
-      return Result::Err("分隔符位置非法");
-    }
-
-    // 读取低4bit
-    int lo = find_token(input, pos, consumed);
-    if (lo < 0) {
-      return Result::Err("非法喵呜片段");
-    }
-    pos += consumed;
-
-    unsigned char c = static_cast<unsigned char>((hi << 4) | lo);
     out.push_back(static_cast<char>(c));
   }
 
   return Result::Ok("");
 }
 
-// 按字节加密：每字节与PRNG输出异或
-std::string encrypt_bytes(const std::string& input, const std::string& key) {
+// XOR加密/解密（对称操作）：每字节与PRNG输出异或
+std::string xor_transform(const std::string& input, const std::string& key) {
   uint32_t seed = fnv1a_32(key);
   XorShift32 prng(seed);
 
@@ -160,11 +176,6 @@ std::string encrypt_bytes(const std::string& input, const std::string& key) {
   return out;
 }
 
-// 解密与加密相同（XOR对称）
-std::string decrypt_bytes(const std::string& input, const std::string& key) {
-  return encrypt_bytes(input, key);
-}
-
 }  // namespace
 
 Result encrypt(const std::string& input, const std::string& key) {
@@ -175,7 +186,11 @@ Result encrypt(const std::string& input, const std::string& key) {
     return Result::Err(error);
   }
 
-  std::string enc = encrypt_bytes(input, k);
+  if (input.size() > 255) {
+    return Result::Err("输入太长（最大255字节）");
+  }
+
+  std::string enc = xor_transform(input, k);
   return Result::Ok(encode_bytes(enc));
 }
 
@@ -193,7 +208,7 @@ Result decrypt(const std::string& input, const std::string& key) {
     return res;
   }
 
-  std::string dec = decrypt_bytes(decoded, k);
+  std::string dec = xor_transform(decoded, k);
   return Result::Ok(dec);
 }
 
