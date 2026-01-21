@@ -4,8 +4,8 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude
 BIN := meowcrypto
 TEST_BIN := meowcrypto_tests
 
-SRC := src/main.cpp src/meow_crypto.cpp src/utf8.cpp
-TEST_SRC := tests/test_meow.cpp src/meow_crypto.cpp src/utf8.cpp
+SRC := src/main.cpp src/meow_crypto.cpp
+TEST_SRC := tests/test_meow.cpp src/meow_crypto.cpp
 
 .PHONY: all clean test
 

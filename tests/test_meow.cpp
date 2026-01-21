@@ -1,10 +1,10 @@
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "meow_crypto.h"
-#include "utf8.h"
 
 namespace {
 
@@ -84,10 +84,14 @@ void test_boundary_lengths() {
   // 最大长度255字节
   test_roundtrip(std::string(255, 'z'));
 
-  // 超过255字节应该失败
-  std::string too_long(256, 'x');
+  // 超过254字节不可压缩数据应该失败（因为加上1字节标记会超过255）
+  // 使用随机数据确保不可压缩
+  std::string too_long;
+  for (int i = 0; i < 256; ++i) {
+    too_long.push_back(static_cast<char>(i));
+  }
   auto res = meowcrypto::encrypt(too_long);
-  require(!res.ok, "input > 255 bytes should fail");
+  require(!res.ok, "input > 254 bytes (uncompressible) should fail");
   require(res.error.find("太长") != std::string::npos,
           "error should mention too long");
 }
@@ -176,107 +180,71 @@ void test_invalid_ciphertext() {
 }
 
 // ========================
-// UTF-8 编解码测试
+// 压缩效果测试
 // ========================
-void test_utf8_codec() {
-  std::cout << "== UTF-8 编解码测试 ==\n";
+void test_compression() {
+  std::cout << "== 压缩效果测试 ==\n";
 
-  std::vector<uint32_t> codepoints;
-  std::string error;
-  std::string encoded;
+  // 重复内容应该被压缩
+  std::string repeated = "abcabcabcabcabcabc";
+  auto enc = meowcrypto::encrypt(repeated, "key");
+  require(enc.ok, "encryption of repeated content should succeed");
+  auto dec = meowcrypto::decrypt(enc.value, "key");
+  require(dec.ok && dec.value == repeated, "roundtrip with compression");
 
-  // 1字节字符 (ASCII)
-  require(meowcrypto::utf8::decode("ABC", codepoints, error),
-          "decode ASCII should succeed");
-  require(codepoints.size() == 3 && codepoints[0] == 'A',
-          "ASCII decode correct");
-
-  // 2字节字符 (拉丁扩展等)
-  codepoints.clear();
-  require(meowcrypto::utf8::decode("é", codepoints, error),
-          "decode 2-byte char should succeed");
-  require(codepoints.size() == 1 && codepoints[0] == 0xE9,
-          "2-byte decode correct");
-
-  // 3字节字符 (中文)
-  codepoints.clear();
-  require(meowcrypto::utf8::decode("中", codepoints, error),
-          "decode 3-byte char should succeed");
-  require(codepoints.size() == 1 && codepoints[0] == 0x4E2D,
-          "3-byte decode correct");
-
-  // 4字节字符 (emoji)
-  codepoints.clear();
-  require(meowcrypto::utf8::decode("😀", codepoints, error),
-          "decode 4-byte char should succeed");
-  require(codepoints.size() == 1 && codepoints[0] == 0x1F600,
-          "4-byte decode correct");
-
-  // 编码测试
-  codepoints = {'A', 0xE9, 0x4E2D, 0x1F600};
-  require(meowcrypto::utf8::encode(codepoints, encoded, error),
-          "encode mixed should succeed");
-  require(encoded == "Aé中😀", "encode result correct");
-
-  // 往返测试
-  std::string test_str = "Hello 你好 😀";
-  codepoints.clear();
-  require(meowcrypto::utf8::decode(test_str, codepoints, error),
-          "decode mixed string");
-  require(meowcrypto::utf8::encode(codepoints, encoded, error), "encode back");
-  require(encoded == test_str, "UTF-8 roundtrip should match");
+  // 随机内容也应该正常工作
+  std::string random_content = "hello world test 123";
+  auto enc2 = meowcrypto::encrypt(random_content, "key");
+  require(enc2.ok, "encryption of random content should succeed");
+  auto dec2 = meowcrypto::decrypt(enc2.value, "key");
+  require(dec2.ok && dec2.value == random_content,
+          "roundtrip without much compression");
 }
 
 // ========================
-// UTF-8 错误处理测试
+// GBK/UTF-8 转换测试
 // ========================
-void test_utf8_errors() {
-  std::cout << "== UTF-8 错误处理测试 ==\n";
+void test_encoding_conversion() {
+  std::cout << "== GBK/UTF-8 转换测试 ==\n";
 
-  std::vector<uint32_t> codepoints;
-  std::string error;
-  std::string encoded;
+  // 测试包含中文字符的加密输出是否为有效UTF-8
+  auto enc = meowcrypto::encrypt("test", "key");
+  require(enc.ok, "encryption should succeed");
 
-  // 非法起始字节 (0x80-0xBF 是续字节，不能作为起始)
-  error.clear();
-  require(!meowcrypto::utf8::decode("\x80", codepoints, error),
-          "invalid start byte should fail");
-  require(!error.empty(), "error message should be set");
+  // 输出应该是有效的UTF-8（能正常显示中文猫叫）
+  // 检查输出不包含无效的UTF-8序列
+  bool valid_utf8 = true;
+  const std::string& out = enc.value;
+  for (size_t i = 0; i < out.size();) {
+    unsigned char c = static_cast<unsigned char>(out[i]);
+    size_t len = 0;
+    if ((c & 0x80) == 0)
+      len = 1;
+    else if ((c & 0xE0) == 0xC0)
+      len = 2;
+    else if ((c & 0xF0) == 0xE0)
+      len = 3;
+    else if ((c & 0xF8) == 0xF0)
+      len = 4;
+    else {
+      valid_utf8 = false;
+      break;
+    }
 
-  // 不完整的多字节序列
-  error.clear();
-  require(!meowcrypto::utf8::decode("\xC2", codepoints, error),
-          "incomplete 2-byte should fail");
-
-  error.clear();
-  require(!meowcrypto::utf8::decode("\xE4\xB8", codepoints, error),
-          "incomplete 3-byte should fail");
-
-  error.clear();
-  require(!meowcrypto::utf8::decode("\xF0\x9F\x98", codepoints, error),
-          "incomplete 4-byte should fail");
-
-  // 非法续字节
-  error.clear();
-  require(!meowcrypto::utf8::decode("\xC2\x00", codepoints, error),
-          "invalid continuation should fail");
-
-  // 过长编码 (用2字节编码1字节字符)
-  error.clear();
-  require(!meowcrypto::utf8::decode("\xC0\x80", codepoints, error),
-          "overlong encoding should fail");
-
-  // 代理对范围 (0xD800-0xDFFF) - 非法Unicode
-  codepoints = {0xD800};
-  error.clear();
-  require(!meowcrypto::utf8::encode(codepoints, encoded, error),
-          "surrogate should fail");
-
-  // 超出Unicode范围
-  codepoints = {0x110000};
-  error.clear();
-  require(!meowcrypto::utf8::encode(codepoints, encoded, error),
-          "out of range should fail");
+    if (i + len > out.size()) {
+      valid_utf8 = false;
+      break;
+    }
+    for (size_t j = 1; j < len; ++j) {
+      if ((static_cast<unsigned char>(out[i + j]) & 0xC0) != 0x80) {
+        valid_utf8 = false;
+        break;
+      }
+    }
+    if (!valid_utf8) break;
+    i += len;
+  }
+  require(valid_utf8, "output should be valid UTF-8");
 }
 
 // ========================
@@ -389,8 +357,8 @@ int main() {
   test_boundary_lengths();
   test_key_handling();
   test_invalid_ciphertext();
-  test_utf8_codec();
-  test_utf8_errors();
+  test_compression();
+  test_encoding_conversion();
   test_output_format();
   test_consistency();
   test_binary_data();
